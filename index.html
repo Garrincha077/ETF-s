@@ -45,6 +45,10 @@ input.inp::placeholder{color:var(--t3)}
 .dot-s{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--t2);font-family:'JetBrains Mono',monospace}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pls 2s infinite}
 .dot.ld{background:var(--amber)}.dot.er{background:var(--red);animation:none}
+.chip{padding:5px 8px;border:1px solid var(--brd);border-radius:999px;font-size:10px;font-family:'JetBrains Mono',monospace;color:var(--t2);background:var(--bg2)}
+.chip.bull{border-color:rgba(13,202,115,.35);color:var(--green)}
+.chip.bear{border-color:rgba(255,56,96,.35);color:var(--red)}
+.chip.neutral{border-color:rgba(255,176,32,.35);color:var(--amber)}
 @keyframes pls{0%,100%{opacity:1}50%{opacity:.3}}
 
 /* Source toggle */
@@ -166,6 +170,15 @@ tr:hover td{background:rgba(0,207,255,.025)}
 .isb.i3{background:var(--s3bg);border-color:var(--s3br)} .isb.i3 h4{color:var(--s3)}
 .isb.i4{background:var(--s4bg);border-color:var(--s4br)} .isb.i4 h4{color:var(--s4)}
 
+/* Alerts */
+.alerts{background:rgba(12,16,25,.7);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,.03);border-radius:11px;padding:14px;margin-bottom:14px;display:none}
+.alerts.vis{display:block}
+.alerts h3{font-size:13px;margin-bottom:10px}
+.alist{display:grid;gap:8px}
+.ait{padding:9px;border:1px solid var(--brd);background:var(--bg2);border-radius:8px;font-size:11px;color:var(--t2)}
+.ait strong{color:var(--t1)}
+.sev-high{border-color:var(--s2br)} .sev-risk{border-color:var(--s3br)} .sev-low{border-color:var(--s4br)}
+
 /* Modal */
 .mov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);backdrop-filter:blur(7px);z-index:100;align-items:center;justify-content:center;padding:16px}
 .mov.vis{display:flex}
@@ -213,12 +226,14 @@ tr.fi{animation:fadeIn .25s ease forwards}
   </div>
   <div class="hdr-r">
     <div class="dot-s"><div class="dot" id="sDot"></div><span id="sTxt">Spreman</span></div>
+    <div class="chip neutral" id="regimeChip">MKT: NEUTRAL</div>
     <!-- Data Source Toggle -->
     <div class="src-toggle">
       <button class="src-btn active" data-src="yahoo" onclick="setSource('yahoo')">Yahoo Finance</button>
       <button class="src-btn" data-src="td" onclick="setSource('td')">Twelve Data</button>
     </div>
     <button class="btn sm" onclick="toggleInfo()">ℹ Metodologija</button>
+    <button class="btn sm" onclick="toggleAlerts()">🔔 Alerti <span id="alertCnt">0</span></button>
     <button class="btn sm" id="apiBtn" onclick="toggleApiSetup()" style="display:none">🔑 API</button>
     <button class="btn pri" id="fetchBtn" onclick="fetchAllData()">↻ Osvježi</button>
   </div>
@@ -256,6 +271,12 @@ tr.fi{animation:fadeIn .25s ease forwards}
     <div class="isb i3"><h4>▸ Faza 3 — Distribucija</h4><p>Cijena oko zaravnjenog/padajućeg MA. Institucije distribuiraju. Zaštiti pozicije.</p></div>
     <div class="isb i4"><h4>▸ Faza 4 — Pad</h4><p>Cijena ispod padajućeg MA. Izbjegavaj kupnju. Čekaj formiranje baze (F1).</p></div>
   </div>
+</div>
+
+<!-- Alerts Panel -->
+<div class="alerts" id="alertsP">
+  <h3>🔔 Stage transition alerti</h3>
+  <div class="alist" id="alertsList"><div class="ait">Nema alerta.</div></div>
 </div>
 
 <!-- Tabs -->
@@ -391,6 +412,9 @@ const THEM=[
 let allData=[], filtered=[], activeTab='national', stageFilt='all', activePeriod='1D';
 let dataSource='yahoo', spyCloses=null, isFetching=false;
 let tdCalls=0, tdMinStart=Date.now(), tdDaily=0;
+let marketRegime={label:'NEUTRAL',className:'neutral',mult:1};
+let prevStageMap={};
+let alerts=[];
 
 // ════════════════════════ PERIOD MAPPING ════════════════════════
 // Each period defines how many trading days back to look for change calc
@@ -466,6 +490,7 @@ function saveKey(){
   localStorage.setItem('td_key',k);
   updateApiUI();
 }
+
 function clearKey(){ localStorage.removeItem('td_key'); updateApiUI(); }
 function updateApiUI(){
   const k=getKey();
@@ -531,27 +556,63 @@ function atr(h,l,c,p=14){
   return s/p;
 }
 
-function detectStage(closes){
-  const m150=ma(closes,150);
-  if(!m150) return {stage:0,label:'N/A',sub:''};
-  const price=closes[closes.length-1], slope=maSlope(closes,150,20);
-  const above=price>m150, dist=((price-m150)/m150)*100;
-  const m50=ma(closes,50), m20=ma(closes,20);
-  const F=0.8;
-  
-  if(above && slope>F){
-    if(m50&&m20&&m20>m50&&m50>m150) return {stage:2,label:'Napredovanje',sub:'Puni trend'};
-    return {stage:2,label:'Napredovanje',sub:'Uzlazni'};
+function toWeekly(closes, volumes, dates){
+  const wk=[];
+  const m=new Map();
+  for(let i=0;i<closes.length;i++){
+    const d=dates?.[i]||'';
+    const k=d?`${new Date(d).getUTCFullYear()}-${String(new Date(d).getUTCMonth()+1).padStart(2,'0')}-W${Math.ceil(new Date(d).getUTCDate()/7)}`:`W${Math.floor(i/5)}`;
+    if(!m.has(k)) m.set(k,{close:closes[i],vol:0});
+    const row=m.get(k);
+    row.close=closes[i];
+    row.vol+=(volumes?.[i]||0);
   }
-  if(!above && slope<-F) return {stage:4,label:'Pad',sub:'Silazni'};
-  if(Math.abs(slope)<=F){
-    if(above && dist<4) return {stage:3,label:'Distribucija',sub:'Vrh'};
-    if(!above && Math.abs(dist)<5) return {stage:1,label:'Baza',sub:'Akumulacija'};
-    return above ? {stage:2,label:'Napredovanje',sub:'Kasna'} : {stage:4,label:'Pad',sub:'Kasna'};
+  for(const v of m.values()) wk.push(v);
+  return {wc:wk.map(x=>x.close), wv:wk.map(x=>x.vol)};
+}
+function smaSeries(arr,p){
+  const out=[];
+  for(let i=0;i<arr.length;i++){
+    if(i+1<p){ out.push(null); continue; }
+    const s=arr.slice(i+1-p,i+1).reduce((a,b)=>a+b,0);
+    out.push(s/p);
   }
-  if(above && slope<-F) return {stage:1,label:'Baza',sub:'Rani oporavak'};
-  if(!above && slope>F) return {stage:3,label:'Distribucija',sub:'Korekcija'};
-  return {stage:1,label:'Baza',sub:'?'};
+  return out;
+}
+function detectMarketRegime(closes){
+  const {wc}=toWeekly(closes,[],[]);
+  const ma30=smaSeries(wc,30);
+  const last=wc[wc.length-1], m=ma30[ma30.length-1], m5=ma30[Math.max(0,ma30.length-6)];
+  if(!m||!m5) return {label:'NEUTRAL',className:'neutral',mult:1};
+  if(last>m && m>m5) return {label:'BULL',className:'bull',mult:1.1};
+  if(last<m && m<m5) return {label:'BEAR',className:'bear',mult:0.85};
+  return {label:'NEUTRAL',className:'neutral',mult:1};
+}
+function detectStage(closes, volumes, dates, rs=50){
+  const {wc,wv}=toWeekly(closes,volumes,dates);
+  const ma30=smaSeries(wc,30);
+  const vol10=smaSeries(wv,10);
+  const i=wc.length-1;
+  const m=ma30[i], m5=ma30[Math.max(0,i-5)], m10=ma30[Math.max(0,i-10)];
+  if(!m||!m5) return {stage:0,label:'N/A',sub:'',confidence:0,persistence:0,volumeConfirmed:false,reasons:[]};
+  const price=wc[i], above=price>m;
+  const rising= m>m5 && m5>m10;
+  const falling= m<m5 && m5<m10;
+  const near=Math.abs((price-m)/m)*100<4;
+  const volRatio=(wv[i]&&vol10[i])?wv[i]/vol10[i]:1;
+  const volConfirm=volRatio>=1.5;
+  const persistence=(arr)=>{ let c=0; for(let j=i;j>=0&&arr(j);j--) c++; return c; };
+  let stage=1,label='Baza',sub='Akumulacija',reasons=[];
+  if(above && rising){ stage=2; label='Napredovanje'; sub=volConfirm?'Breakout potvrđen':'Uzlazni'; reasons.push('Iznad rastućeg 30W MA'); }
+  else if(!above && falling){ stage=4; label='Pad'; sub=volConfirm?'Breakdown potvrđen':'Silazni'; reasons.push('Ispod padajućeg 30W MA'); }
+  else if(above && !rising && near){ stage=3; label='Distribucija'; sub='Bočni vrh'; reasons.push('Iznad ali MA se zaravnjuje'); }
+  else if(!above && !falling && near){ stage=1; label='Baza'; sub='Akumulacija'; reasons.push('Ispod/oko ravnog MA'); }
+  const pers = stage===2 ? persistence(j=>wc[j]>ma30[j] && ma30[j] && ma30[j]>ma30[Math.max(0,j-5)]) :
+               stage===4 ? persistence(j=>wc[j]<ma30[j] && ma30[j] && ma30[j]<ma30[Math.max(0,j-5)]) :
+               persistence(j=>Math.abs((wc[j]-ma30[j])/ma30[j])*100<5);
+  let confidence=45 + (rising||falling?20:10) + (volConfirm?15:0) + Math.max(-10,Math.min(15,(rs-50)/2));
+  confidence=Math.max(0,Math.min(100,Math.round(confidence*marketRegime.mult)));
+  return {stage,label,sub,confidence,persistence:pers,volumeConfirmed:volConfirm,volumeRatioWeekly:volRatio,reasons};
 }
 
 function calcRS(c,bench){
@@ -573,8 +634,8 @@ async function processETF(def,type){
     const slope=maSlope(c,150,20);
     const dist=m150?((price-m150)/m150)*100:0;
     const at=atr(h,lo,c);
-    const stg=detectStage(c);
     const rs=calcRS(c,spyCloses);
+    const stg=detectStage(c,vol,dt,rs);
     
     // All period changes
     const changes={};
@@ -591,6 +652,8 @@ async function processETF(def,type){
       price, changes, ma150:m150, ma50:m50, ma20:m20,
       maSlope:slope, distFromMA:dist, atr:at, atrPct:price>0?(at/price)*100:0,
       stage:stg.stage, stageLabel:stg.label, stageSub:stg.sub,
+      stageConfidence:stg.confidence, stagePersistence:stg.persistence, stageReasons:stg.reasons,
+      volumeConfirmed:stg.volumeConfirmed, volumeRatioWeekly:stg.volumeRatioWeekly,
       volRatio:avgV>0?recV/avgV:1, rs,
       sparkline:c.slice(-60), closes:c, volumes:vol, highs:h, lows:lo, dates:dt,
     };
@@ -599,6 +662,42 @@ async function processETF(def,type){
     return null;
   }
 }
+
+
+function updateRegimeChip(){
+  const el=document.getElementById('regimeChip');
+  if(!el) return;
+  el.classList.remove('bull','bear','neutral');
+  el.classList.add(marketRegime.className||'neutral');
+  el.textContent=`MKT: ${marketRegime.label}`;
+}
+function transitionSeverity(oldS,newS){
+  if(oldS===1&&newS===2) return 'high';
+  if((oldS===2&&newS===3)||(oldS===3&&newS===4)) return 'risk';
+  return 'low';
+}
+function buildTransitionAlerts(){
+  const fresh=[];
+  allData.forEach(d=>{
+    const oldS=prevStageMap[d.ticker];
+    const newS=d.stage;
+    if(oldS&&oldS!==newS&&d.stageConfidence>=55&&d.stagePersistence>=2){
+      fresh.push({ticker:d.ticker,oldStage:oldS,newStage:newS,confidence:d.stageConfidence,severity:transitionSeverity(oldS,newS),reason:(d.stageReasons||[]).join(' · '),ts:Date.now(),regime:marketRegime.label});
+    }
+    prevStageMap[d.ticker]=newS;
+  });
+  alerts=[...fresh,...alerts].slice(0,30);
+  localStorage.setItem('stage_prev_v1',JSON.stringify(prevStageMap));
+  localStorage.setItem('stage_alerts_v1',JSON.stringify(alerts));
+  renderAlerts();
+}
+function renderAlerts(){
+  const c=document.getElementById('alertCnt'); if(c) c.textContent=alerts.length;
+  const list=document.getElementById('alertsList'); if(!list) return;
+  if(!alerts.length){ list.innerHTML='<div class="ait">Nema alerta.</div>'; return; }
+  list.innerHTML=alerts.slice(0,12).map(a=>`<div class="ait sev-${a.severity}"><strong>${a.ticker}</strong>: F${a.oldStage} → F${a.newStage} · conf ${a.confidence}% · ${a.regime}<br>${a.reason||''}</div>`).join('');
+}
+function toggleAlerts(){document.getElementById('alertsP').classList.toggle('vis')}
 
 // ════════════════════════ MAIN FETCH ════════════════════════
 async function fetchAllData(){
@@ -622,7 +721,9 @@ async function fetchAllData(){
     prog.innerHTML='SPY benchmark...';
     const spy=await fetchTicker('SPY');
     spyCloses=spy.closes;
-  }catch(e){ spyCloses=null; }
+    marketRegime=detectMarketRegime(spy.closes);
+    updateRegimeChip();
+  }catch(e){ spyCloses=null; marketRegime={label:'NEUTRAL',className:'neutral',mult:1}; updateRegimeChip(); }
   
   const etfs=[...NAT.map(e=>({...e,_t:'national'})),...THEM.map(e=>({...e,_t:'thematic'}))];
   let done=0, errs=0;
@@ -650,6 +751,7 @@ async function fetchAllData(){
     localStorage.setItem('etf_cache_v3',JSON.stringify(cache));
   }catch(e){}
   
+  buildTransitionAlerts();
   isFetching=false; btn.disabled=false;
   applyFilters(); updateStats();
 }
@@ -751,7 +853,7 @@ function renderTable(){
       <td style="color:var(--t2);font-size:10px">${cat}</td>
       <td class="pc">$${d.price.toFixed(2)}</td>
       <td class="pc ${cc}" title="${pLabel}">${sign}${chg.toFixed(2)}%</td>
-      <td><span class="sb s${d.stage}">F${d.stage} ${d.stageLabel}</span></td>
+      <td><span class="sb s${d.stage}">F${d.stage} ${d.stageLabel}</span><div style="font-size:9px;color:var(--t3);margin-top:3px">${d.stageConfidence||0}% · ${d.volumeConfirmed?'Vol✅':'Vol⚠️'}</div></td>
       <td class="mc">${d.ma150?'$'+d.ma150.toFixed(2):'—'}</td>
       <td class="mc ${mc}">${d.distFromMA>=0?'+':''}${d.distFromMA.toFixed(1)}%</td>
       <td class="mc ${sc}">${d.maSlope>=0?'+':''}${d.maSlope.toFixed(2)}%</td>
@@ -800,6 +902,7 @@ function openMod(ticker){
     <div class="ms"><div class="ml">RS vs SPY</div><div class="mv" style="color:${d.rs>=60?'var(--green)':d.rs<=40?'var(--red)':'var(--t2)'}">${d.rs.toFixed(1)}</div></div>
     <div class="ms"><div class="ml">ATR (14d)</div><div class="mv">$${d.atr.toFixed(2)} <span style="font-size:10px;color:var(--t2)">(${d.atrPct.toFixed(1)}%)</span></div></div>
     <div class="ms"><div class="ml">Vol. Ratio</div><div class="mv">${d.volRatio.toFixed(2)}x</div></div>
+    <div class="ms"><div class="ml">Stage confidence</div><div class="mv">${(d.stageConfidence||0)}% · ${d.volumeConfirmed?'potvrđen':'na watchlisti'}</div></div>
   `;
   
   const txt={
@@ -874,6 +977,10 @@ function toggleApiSetup(){document.getElementById('apiSetup').classList.toggle('
 
 // ════════════════════════ INIT ════════════════════════
 updateApiUI();
+updateRegimeChip();
+try{ prevStageMap=JSON.parse(localStorage.getItem('stage_prev_v1')||'{}'); }catch(e){ prevStageMap={}; }
+try{ alerts=JSON.parse(localStorage.getItem('stage_alerts_v1')||'[]'); }catch(e){ alerts=[]; }
+renderAlerts();
 
 // Load cache
 try{
