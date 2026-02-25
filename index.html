@@ -179,6 +179,19 @@ tr:hover td{background:rgba(0,207,255,.025)}
 .ait strong{color:var(--t1)}
 .sev-high{border-color:var(--s2br)} .sev-risk{border-color:var(--s3br)} .sev-low{border-color:var(--s4br)}
 
+/* AI Wizard */
+.aiw{background:rgba(12,16,25,.72);backdrop-filter:blur(16px);border:1px solid rgba(255,255,255,.03);border-radius:11px;padding:14px;margin-bottom:14px;display:none}
+.aiw.vis{display:block}
+.aiw h3{font-size:13px;margin-bottom:9px;display:flex;align-items:center;gap:8px}
+.airow{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.airow .inp{min-width:260px;flex:1}
+.aihint{font-size:10px;color:var(--t2);line-height:1.5;margin-bottom:10px}
+.aitbl{width:100%;border-collapse:collapse;font-size:10px}
+.aitbl th,.aitbl td{padding:7px;border-bottom:1px solid rgba(26,36,64,.5);text-align:left;vertical-align:top}
+.aitbl th{color:var(--t2);font-family:'JetBrains Mono',monospace;font-size:9px;text-transform:uppercase}
+.aist{font-family:'JetBrains Mono',monospace;font-weight:600}
+.aiok{color:var(--green)} .aiwarn{color:var(--amber)} .aibad{color:var(--red)}
+
 /* Modal */
 .mov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);backdrop-filter:blur(7px);z-index:100;align-items:center;justify-content:center;padding:16px}
 .mov.vis{display:flex}
@@ -234,6 +247,7 @@ tr.fi{animation:fadeIn .25s ease forwards}
     </div>
     <button class="btn sm" onclick="toggleInfo()">ℹ Metodologija</button>
     <button class="btn sm" onclick="toggleAlerts()">🔔 Alerti <span id="alertCnt">0</span></button>
+    <button class="btn sm" onclick="toggleAiWizard()">🧠 AI Wizard</button>
     <button class="btn sm" id="apiBtn" onclick="toggleApiSetup()" style="display:none">🔑 API</button>
     <button class="btn pri" id="fetchBtn" onclick="fetchAllData()">↻ Osvježi</button>
   </div>
@@ -277,6 +291,27 @@ tr.fi{animation:fadeIn .25s ease forwards}
 <div class="alerts" id="alertsP">
   <h3>🔔 Stage transition alerti</h3>
   <div class="alist" id="alertsList"><div class="ait">Nema alerta.</div></div>
+</div>
+
+
+
+<!-- AI Wizard Panel -->
+<div class="aiw" id="aiWizP">
+  <h3>🧠 AI Stage Wizard (LLM + web pravila)</h3>
+  <div class="airow">
+    <input class="inp" type="password" id="aiKeyIn" placeholder="OpenRouter API key (npr. sk-or-v1-...)">
+    <button class="btn sm" onclick="saveAiKey()">Spremi ključ</button>
+    <button class="btn sm" onclick="clearAiKey()" style="color:var(--red)">Obriši</button>
+    <button class="btn pri" id="aiRunBtn" onclick="runAiWizard()">Analiziraj sve ETF-ove</button>
+  </div>
+  <div class="aihint">AI koristi podatke iz appa + Weinstein pravila (30W MA, volumen, RS) i referentne web izvore u promptu. Za free ključ koristi OpenRouter free modele.</div>
+  <div id="aiStatus" class="ldt">Nije pokrenuto.</div>
+  <div style="overflow:auto;margin-top:8px">
+    <table class="aitbl">
+      <thead><tr><th>Ticker</th><th>AI stage</th><th>Conf.</th><th>Razlog</th><th>Usporedba s app</th></tr></thead>
+      <tbody id="aiBody"><tr><td colspan="5" class="emp">Nema AI analize.</td></tr></tbody>
+    </table>
+  </div>
 </div>
 
 <!-- Tabs -->
@@ -415,6 +450,7 @@ let tdCalls=0, tdMinStart=Date.now(), tdDaily=0;
 let marketRegime={label:'NEUTRAL',className:'neutral',mult:1};
 let prevStageMap={};
 let alerts=[];
+let aiResults=[];
 
 // ════════════════════════ PERIOD MAPPING ════════════════════════
 // Each period defines how many trading days back to look for change calc
@@ -717,6 +753,7 @@ function buildTransitionAlerts(){
   localStorage.setItem('stage_alerts_v1',JSON.stringify(alerts));
   renderAlerts();
 }
+
 function renderAlerts(){
   const c=document.getElementById('alertCnt'); if(c) c.textContent=alerts.length;
   const list=document.getElementById('alertsList'); if(!list) return;
@@ -724,6 +761,91 @@ function renderAlerts(){
   list.innerHTML=alerts.slice(0,12).map(a=>`<div class="ait sev-${a.severity}"><strong>${a.ticker}</strong>: F${a.oldStage} → F${a.newStage} · conf ${a.confidence}% · ${a.regime}<br>${a.reason||''}</div>`).join('');
 }
 function toggleAlerts(){document.getElementById('alertsP').classList.toggle('vis')}
+
+function getAiKey(){ return localStorage.getItem('ai_router_key')||''; }
+function saveAiKey(){
+  const k=document.getElementById('aiKeyIn').value.trim();
+  if(!k) return;
+  localStorage.setItem('ai_router_key',k);
+  document.getElementById('aiStatus').textContent='AI ključ spremljen.';
+}
+function clearAiKey(){ localStorage.removeItem('ai_router_key'); document.getElementById('aiStatus').textContent='AI ključ obrisan.'; }
+function toggleAiWizard(){document.getElementById('aiWizP').classList.toggle('vis')}
+function aiRowClass(conf){ return conf>=75?'aiok':conf>=55?'aiwarn':'aibad'; }
+function renderAiResults(){
+  const body=document.getElementById('aiBody');
+  if(!aiResults.length){ body.innerHTML='<tr><td colspan="5" class="emp">Nema AI analize.</td></tr>'; return; }
+  body.innerHTML=aiResults.map(r=>{
+    const m=allData.find(d=>d.ticker===r.ticker);
+    const appStage=m?.stage||'—';
+    const diff=(appStage===r.stage)?'✅ podudara se':`⚠️ app F${appStage}`;
+    return `<tr><td><strong>${r.ticker}</strong></td><td class="aist">F${r.stage}</td><td class="${aiRowClass(r.confidence||0)}">${r.confidence||0}%</td><td>${r.reason||''}</td><td>${diff}</td></tr>`;
+  }).join('');
+}
+function buildAiPayload(){
+  return allData.map(d=>({
+    ticker:d.ticker, name:d.name, category:d.type,
+    price:+d.price.toFixed(2),
+    stageApp:d.stage,
+    stageConfidence:d.stageConfidence||0,
+    ma150:d.ma150?+d.ma150.toFixed(2):null,
+    distFromMA:+(d.distFromMA||0).toFixed(2),
+    maSlope:+(d.maSlope||0).toFixed(3),
+    rs:+(d.rs||0).toFixed(1),
+    volRatioDaily:+(d.volRatio||0).toFixed(2),
+    chg1W:+((d.changes?.['1W'])||0).toFixed(2),
+    chg1M:+((d.changes?.['1M'])||0).toFixed(2)
+  }));
+}
+function extractJsonArray(txt){
+  try{ const j=JSON.parse(txt); return Array.isArray(j)?j:[]; }catch(e){}
+  const m=txt.match(/\[[\s\S]*\]/);
+  if(!m) return [];
+  try{ const j=JSON.parse(m[0]); return Array.isArray(j)?j:[]; }catch(e){ return []; }
+}
+async function runAiWizard(){
+  if(!allData.length) return alert('Prvo učitaj podatke (Osvježi).');
+  const key=getAiKey();
+  if(!key) return alert('Unesi OpenRouter API key za AI Wizard.');
+  const btn=document.getElementById('aiRunBtn');
+  const st=document.getElementById('aiStatus');
+  btn.disabled=true; st.textContent='AI analiza u tijeku...';
+  const payload=buildAiPayload();
+  const prompt=`Analiziraj ETF-ove po Weinstein stage analizi koristeći dane podatke i pravila: Stage 1-4, 30-week MA koncept, potvrda volumena, RS.
+Web reference koje trebaš poštovati: https://traderlion.com/trading-strategies/stage-analysis/ i https://en.wikipedia.org/wiki/Stan_Weinstein .
+Vrati ISKLJUČIVO JSON array objekata oblika {"ticker":"SPY","stage":2,"confidence":78,"reason":"kratko"}. Bez dodatnog teksta.
+Podaci ETF-ova:
+${JSON.stringify(payload)}`;
+  try{
+    const r=await fetch('https://openrouter.ai/api/v1/chat/completions',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':`Bearer ${key}`,'HTTP-Referer':location.origin,'X-Title':'ETF Stage Wizard'},
+      body:JSON.stringify({
+        model:'deepseek/deepseek-chat:free',
+        temperature:0.1,
+        messages:[
+          {role:'system',content:'Ti si financijski analitičar specijaliziran za Weinstein stage analizu.'},
+          {role:'user',content:prompt}
+        ]
+      })
+    });
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j=await r.json();
+    const txt=j?.choices?.[0]?.message?.content||'';
+    const arr=extractJsonArray(txt).map(x=>({
+      ticker:String(x.ticker||'').toUpperCase(),
+      stage:Math.min(4,Math.max(1,Number(x.stage)||1)),
+      confidence:Math.min(100,Math.max(0,Number(x.confidence)||0)),
+      reason:String(x.reason||'')
+    })).filter(x=>x.ticker);
+    aiResults=arr;
+    localStorage.setItem('ai_stage_results_v1',JSON.stringify({ts:Date.now(),data:aiResults}));
+    st.textContent=`AI analiza gotova: ${aiResults.length} ETF-ova.`;
+    renderAiResults();
+  }catch(e){
+    st.textContent=`AI greška: ${e.message}`;
+  }finally{ btn.disabled=false; }
+}
 
 // ════════════════════════ MAIN FETCH ════════════════════════
 async function fetchAllData(){
@@ -1007,6 +1129,8 @@ updateRegimeChip();
 try{ prevStageMap=JSON.parse(localStorage.getItem('stage_prev_v1')||'{}'); }catch(e){ prevStageMap={}; }
 try{ alerts=JSON.parse(localStorage.getItem('stage_alerts_v1')||'[]'); }catch(e){ alerts=[]; }
 renderAlerts();
+try{ const x=JSON.parse(localStorage.getItem('ai_stage_results_v1')||'null'); if(x?.data){ aiResults=x.data; renderAiResults(); } }catch(e){}
+if(getAiKey()) document.getElementById('aiStatus').textContent='AI ključ učitan iz local storage.';
 
 // Load cache
 try{
