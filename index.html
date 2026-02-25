@@ -560,8 +560,17 @@ function toWeekly(closes, volumes, dates){
   const wk=[];
   const m=new Map();
   for(let i=0;i<closes.length;i++){
-    const d=dates?.[i]||'';
-    const k=d?`${new Date(d).getUTCFullYear()}-${String(new Date(d).getUTCMonth()+1).padStart(2,'0')}-W${Math.ceil(new Date(d).getUTCDate()/7)}`:`W${Math.floor(i/5)}`;
+    const raw=dates?.[i];
+    const dt=raw?new Date(raw.length===10?`${raw}T00:00:00Z`:raw):null;
+    let k;
+    if(dt && !isNaN(dt)){
+      const monday=new Date(Date.UTC(dt.getUTCFullYear(),dt.getUTCMonth(),dt.getUTCDate()));
+      const dow=(monday.getUTCDay()+6)%7;
+      monday.setUTCDate(monday.getUTCDate()-dow);
+      k=monday.toISOString().slice(0,10);
+    }else{
+      k=`W${Math.floor(i/5)}`;
+    }
     if(!m.has(k)) m.set(k,{close:closes[i],vol:0});
     const row=m.get(k);
     row.close=closes[i];
@@ -585,7 +594,7 @@ function detectMarketRegime(closes){
   const last=wc[wc.length-1], m=ma30[ma30.length-1], m5=ma30[Math.max(0,ma30.length-6)];
   if(!m||!m5) return {label:'NEUTRAL',className:'neutral',mult:1};
   if(last>m && m>m5) return {label:'BULL',className:'bull',mult:1.1};
-  if(last<m && m<m5) return {label:'BEAR',className:'bear',mult:0.85};
+  if(last<m && m<m5) return {label:'BEAR',className:'bear',mult:0.9};
   return {label:'NEUTRAL',className:'neutral',mult:1};
 }
 function detectStage(closes, volumes, dates, rs=50){
@@ -594,23 +603,25 @@ function detectStage(closes, volumes, dates, rs=50){
   const vol10=smaSeries(wv,10);
   const i=wc.length-1;
   const m=ma30[i], m5=ma30[Math.max(0,i-5)], m10=ma30[Math.max(0,i-10)];
-  if(!m||!m5) return {stage:0,label:'N/A',sub:'',confidence:0,persistence:0,volumeConfirmed:false,reasons:[]};
+  if(!m||!m5) return {stage:1,label:'Baza',sub:'Rani podaci',confidence:35,persistence:1,volumeConfirmed:null,reasons:['Nedovoljno weekly povijesti']};
   const price=wc[i], above=price>m;
-  const rising= m>m5 && m5>m10;
-  const falling= m<m5 && m5<m10;
+  const rising=m10!=null && m>m5 && m5>m10;
+  const falling=m10!=null && m<m5 && m5<m10;
   const near=Math.abs((price-m)/m)*100<4;
-  const volRatio=(wv[i]&&vol10[i])?wv[i]/vol10[i]:1;
-  const volConfirm=volRatio>=1.5;
+  const hasVolData=(wv.some(v=>v>0) && vol10[i] && vol10[i]>0);
+  const volRatio=hasVolData?(wv[i]/vol10[i]):null;
+  const volConfirm=hasVolData?(volRatio>=1.5):null;
   const persistence=(arr)=>{ let c=0; for(let j=i;j>=0&&arr(j);j--) c++; return c; };
   let stage=1,label='Baza',sub='Akumulacija',reasons=[];
-  if(above && rising){ stage=2; label='Napredovanje'; sub=volConfirm?'Breakout potvrđen':'Uzlazni'; reasons.push('Iznad rastućeg 30W MA'); }
-  else if(!above && falling){ stage=4; label='Pad'; sub=volConfirm?'Breakdown potvrđen':'Silazni'; reasons.push('Ispod padajućeg 30W MA'); }
+  if(above && rising){ stage=2; label='Napredovanje'; sub=volConfirm===true?'Breakout potvrđen':'Uzlazni'; reasons.push('Iznad rastućeg 30W MA'); }
+  else if(!above && falling){ stage=4; label='Pad'; sub=volConfirm===true?'Breakdown potvrđen':'Silazni'; reasons.push('Ispod padajućeg 30W MA'); }
   else if(above && !rising && near){ stage=3; label='Distribucija'; sub='Bočni vrh'; reasons.push('Iznad ali MA se zaravnjuje'); }
   else if(!above && !falling && near){ stage=1; label='Baza'; sub='Akumulacija'; reasons.push('Ispod/oko ravnog MA'); }
   const pers = stage===2 ? persistence(j=>wc[j]>ma30[j] && ma30[j] && ma30[j]>ma30[Math.max(0,j-5)]) :
                stage===4 ? persistence(j=>wc[j]<ma30[j] && ma30[j] && ma30[j]<ma30[Math.max(0,j-5)]) :
                persistence(j=>Math.abs((wc[j]-ma30[j])/ma30[j])*100<5);
-  let confidence=45 + (rising||falling?20:10) + (volConfirm?15:0) + Math.max(-10,Math.min(15,(rs-50)/2));
+  let confidence=45 + (rising||falling?20:10) + Math.max(-10,Math.min(15,(rs-50)/2));
+  if(volConfirm===true) confidence+=12;
   confidence=Math.max(0,Math.min(100,Math.round(confidence*marketRegime.mult)));
   return {stage,label,sub,confidence,persistence:pers,volumeConfirmed:volConfirm,volumeRatioWeekly:volRatio,reasons};
 }
@@ -664,6 +675,21 @@ async function processETF(def,type){
 }
 
 
+function enrichCachedETF(d){
+  if(!d?.closes?.length) return d;
+  const vol=(d.volumes&&d.volumes.length===d.closes.length)?d.volumes:Array(d.closes.length).fill(0);
+  const dates=(d.dates&&d.dates.length===d.closes.length)?d.dates:Array(d.closes.length).fill('');
+  const rs=calcRS(d.closes,spyCloses);
+  const stg=detectStage(d.closes,vol,dates,rs);
+  return {
+    ...d,
+    stage:stg.stage, stageLabel:stg.label, stageSub:stg.sub,
+    stageConfidence:stg.confidence, stagePersistence:stg.persistence, stageReasons:stg.reasons,
+    volumeConfirmed:stg.volumeConfirmed, volumeRatioWeekly:stg.volumeRatioWeekly,
+    rs
+  };
+}
+
 function updateRegimeChip(){
   const el=document.getElementById('regimeChip');
   if(!el) return;
@@ -681,7 +707,7 @@ function buildTransitionAlerts(){
   allData.forEach(d=>{
     const oldS=prevStageMap[d.ticker];
     const newS=d.stage;
-    if(oldS&&oldS!==newS&&d.stageConfidence>=55&&d.stagePersistence>=2){
+    if(oldS&&oldS!==newS&&d.stageConfidence>=45&&d.stagePersistence>=1){
       fresh.push({ticker:d.ticker,oldStage:oldS,newStage:newS,confidence:d.stageConfidence,severity:transitionSeverity(oldS,newS),reason:(d.stageReasons||[]).join(' · '),ts:Date.now(),regime:marketRegime.label});
     }
     prevStageMap[d.ticker]=newS;
@@ -694,7 +720,7 @@ function buildTransitionAlerts(){
 function renderAlerts(){
   const c=document.getElementById('alertCnt'); if(c) c.textContent=alerts.length;
   const list=document.getElementById('alertsList'); if(!list) return;
-  if(!alerts.length){ list.innerHTML='<div class="ait">Nema alerta.</div>'; return; }
+  if(!alerts.length){ list.innerHTML='<div class="ait">Nema novih prelazaka stage-a od zadnjeg osvježavanja.</div>'; return; }
   list.innerHTML=alerts.slice(0,12).map(a=>`<div class="ait sev-${a.severity}"><strong>${a.ticker}</strong>: F${a.oldStage} → F${a.newStage} · conf ${a.confidence}% · ${a.regime}<br>${a.reason||''}</div>`).join('');
 }
 function toggleAlerts(){document.getElementById('alertsP').classList.toggle('vis')}
@@ -853,7 +879,7 @@ function renderTable(){
       <td style="color:var(--t2);font-size:10px">${cat}</td>
       <td class="pc">$${d.price.toFixed(2)}</td>
       <td class="pc ${cc}" title="${pLabel}">${sign}${chg.toFixed(2)}%</td>
-      <td><span class="sb s${d.stage}">F${d.stage} ${d.stageLabel}</span><div style="font-size:9px;color:var(--t3);margin-top:3px">${d.stageConfidence||0}% · ${d.volumeConfirmed?'Vol✅':'Vol⚠️'}</div></td>
+      <td><span class="sb s${d.stage}">F${d.stage} ${d.stageLabel}</span><div style="font-size:9px;color:var(--t3);margin-top:3px">${d.stageConfidence||0}% · ${d.volumeConfirmed===true?'Vol✅':(d.volumeConfirmed===false?'Vol⚠️':'Vol n/a')}</div></td>
       <td class="mc">${d.ma150?'$'+d.ma150.toFixed(2):'—'}</td>
       <td class="mc ${mc}">${d.distFromMA>=0?'+':''}${d.distFromMA.toFixed(1)}%</td>
       <td class="mc ${sc}">${d.maSlope>=0?'+':''}${d.maSlope.toFixed(2)}%</td>
@@ -902,7 +928,7 @@ function openMod(ticker){
     <div class="ms"><div class="ml">RS vs SPY</div><div class="mv" style="color:${d.rs>=60?'var(--green)':d.rs<=40?'var(--red)':'var(--t2)'}">${d.rs.toFixed(1)}</div></div>
     <div class="ms"><div class="ml">ATR (14d)</div><div class="mv">$${d.atr.toFixed(2)} <span style="font-size:10px;color:var(--t2)">(${d.atrPct.toFixed(1)}%)</span></div></div>
     <div class="ms"><div class="ml">Vol. Ratio</div><div class="mv">${d.volRatio.toFixed(2)}x</div></div>
-    <div class="ms"><div class="ml">Stage confidence</div><div class="mv">${(d.stageConfidence||0)}% · ${d.volumeConfirmed?'potvrđen':'na watchlisti'}</div></div>
+    <div class="ms"><div class="ml">Stage confidence</div><div class="mv">${(d.stageConfidence||0)}% · ${d.volumeConfirmed===true?'potvrđen':(d.volumeConfirmed===false?'na watchlisti':'nema volume podataka')}</div></div>
   `;
   
   const txt={
@@ -987,9 +1013,12 @@ try{
   const c=JSON.parse(localStorage.getItem('etf_cache_v3'));
   if(c&&Date.now()-c.ts<43200000){
     allData=c.data;
-    // Recalculate RS from cached closes if SPY present
+    // Recalculate RS/stage from cached closes if SPY present
     const spyD=allData.find(d=>d.ticker==='SPY');
     if(spyD) spyCloses=spyD.closes;
+    marketRegime=spyCloses?.length?detectMarketRegime(spyCloses):marketRegime;
+    updateRegimeChip();
+    allData=allData.map(enrichCachedETF);
     applyFilters(); updateStats();
     document.getElementById('sTxt').textContent='Cache';
     document.getElementById('fprog').innerHTML=`<span class="ok">📦</span> ${allData.length} (${new Date(c.ts).toLocaleTimeString('hr-HR')})`;
